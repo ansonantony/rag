@@ -1,0 +1,146 @@
+name: Deploy to AWS ECS
+
+# Deploy to ECS on push to main branch
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:  # Allow manual deployment
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Backend: Build and push Docker image
+      - name: Build backend Docker image
+        id: backend-build
+        run: |
+          # Replace these values with your own
+          # AWS_ACCOUNT_ID: your AWS account ID
+          # AWS_REGION: your AWS region (e.g., us-east-1)
+          # ECR_REPOSITORY_BACKEND: name of your backend ECR repository
+          IMAGE_BACKEND=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY_BACKEND }}:${{ github.sha }}
+          echo "image=$IMAGE_BACKEND" >> $GITHUB_OUTPUT
+          docker build -t $IMAGE_BACKEND ./backend
+          docker push $IMAGE_BACKEND
+
+      # Frontend: Build and push Docker image
+      - name: Build frontend Docker image
+        id: frontend-build
+        run: |
+          # Replace these values with your own
+          # AWS_ACCOUNT_ID: your AWS account ID
+          # AWS_REGION: your AWS region (e.g., us-east-1)
+          # ECR_REPOSITORY_FRONTEND: name of your frontend ECR repository
+          IMAGE_FRONTEND=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY_FRONTEND }}:${{ github.sha }}
+          echo "image=$IMAGE_FRONTEND" >> $GITHUB_OUTPUT
+          docker build -t $IMAGE_FRONTEND ./frontend
+          docker push $IMAGE_FRONTEND
+
+      # Create new task definition for backend
+      - name: Fill in the new backend task definition
+        id: backend-taskdef
+        run: |
+          # Replace these values with your own
+          # TASK_DEF_BACKEND: name of your backend task definition family
+          # CONTAINER_NAME_BACKEND: name of the container in your task definition
+          # AWS_ACCOUNT_ID: your AWS account ID
+          # AWS_REGION: your AWS region
+          # ECR_REPOSITORY_BACKEND: name of your backend ECR repository
+          
+          TASK_DEF_BACKEND=${{ secrets.ECS_TASKDEF_BACKEND }}
+          CONTAINER_NAME_BACKEND=${{ secrets.ECS_CONTAINER_NAME_BACKEND }}
+          IMAGE_BACKEND=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY_BACKEND }}:${{ github.sha }}
+          
+          # Create new task definition revision
+          aws ecs register-task-definition \
+            --family $TASK_DEF_BACKEND \
+            --container-definitions "[{\"name\":\"$CONTAINER_NAME_BACKEND\",\"image\":\"$IMAGE_BACKEND\",\"essential\":true,\"portMappings\":[{\"containerPort\":8000,\"hostPort\":8000,\"protocol\":\"tcp\"}],\"environment\":[{\"name\":\"DATABASE_URL\",\"value\":\"${{ secrets.DATABASE_URL }}\"},{\"name\":\"QDRANT_URL\",\"value\":\"${{ secrets.QDRANT_URL }}\"},{\"name\":\"CORS_ORIGINS\",\"value\":\"${{ secrets.CORS_ORIGINS }}\"}]}]"
+          
+          # Get the new task definition ARN
+          TASK_DEF_BACKEND_ARN=$(aws ecs describe-task-definition --task-definition $TASK_DEF_BACKEND --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "task_def_arn=$TASK_DEF_BACKEND_ARN" >> $GITHUB_OUTPUT
+
+      # Create new task definition for frontend
+      - name: Fill in the new frontend task definition
+        id: frontend-taskdef
+        run: |
+          # Replace these values with your own
+          # TASK_DEF_FRONTEND: name of your frontend task definition family
+          # CONTAINER_NAME_FRONTEND: name of the container in your task definition
+          # AWS_ACCOUNT_ID: your AWS account ID
+          # AWS_REGION: your AWS region
+          # ECR_REPOSITORY_FRONTEND: name of your frontend ECR repository
+          
+          TASK_DEF_FRONTEND=${{ secrets.ECS_TASKDEF_FRONTEND }}
+          CONTAINER_NAME_FRONTEND=${{ secrets.ECS_CONTAINER_NAME_FRONTEND }}
+          IMAGE_FRONTEND=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/${{ secrets.ECR_REPOSITORY_FRONTEND }}:${{ github.sha }}
+          
+          # Create new task definition revision
+          aws ecs register-task-definition \
+            --family $TASK_DEF_FRONTEND \
+            --container-definitions "[{\"name\":\"$CONTAINER_NAME_FRONTEND\",\"image\":\"$IMAGE_FRONTEND\",\"essential\":true,\"portMappings\":[{\"containerPort\":3000,\"hostPort\":3000,\"protocol\":\"tcp\"}],\"environment\":[{\"name\":\"NEXT_PUBLIC_RAG_API_URL\",\"value\":\"${{ secrets.NEXT_PUBLIC_RAG_API_URL }}\"}]}]"
+          
+          # Get the new task definition ARN
+          TASK_DEF_FRONTEND_ARN=$(aws ecs describe-task-definition --task-definition $TASK_DEF_FRONTEND --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "task_def_arn=$TASK_DEF_FRONTEND_ARN" >> $GITHUB_OUTPUT
+
+      # Update ECS service for backend
+      - name: Update backend ECS service
+        run: |
+          # Replace these values with your own
+          # CLUSTER_NAME: name of your ECS cluster
+          # SERVICE_NAME_BACKEND: name of your backend ECS service
+          
+          CLUSTER_NAME=${{ secrets.ECS_CLUSTER }}
+          SERVICE_NAME_BACKEND=${{ secrets.ECS_SERVICE_NAME_BACKEND }}
+          TASK_DEF_BACKEND_ARN=${{ steps.backend-taskdef.outputs.task_def_arn }}
+          
+          aws ecs update-service \
+            --cluster $CLUSTER_NAME \
+            --service $SERVICE_NAME_BACKEND \
+            --task-definition $TASK_DEF_BACKEND_ARN \
+            --force-new-deployment
+
+      # Update ECS service for frontend
+      - name: Update frontend ECS service
+        run: |
+          # Replace these values with your own
+          # CLUSTER_NAME: name of your ECS cluster
+          # SERVICE_NAME_FRONTEND: name of your frontend ECS service
+          
+          CLUSTER_NAME=${{ secrets.ECS_CLUSTER }}
+          SERVICE_NAME_FRONTEND=${{ secrets.ECS_SERVICE_NAME_FRONTEND }}
+          TASK_DEF_FRONTEND_ARN=${{ steps.frontend-taskdef.outputs.task_def_arn }}
+          
+          aws ecs update-service \
+            --cluster $CLUSTER_NAME \
+            --service $SERVICE_NAME_FRONTEND \
+            --task-definition $TASK_DEF_FRONTEND_ARN \
+            --force-new-deployment
+
+      # Optional: Run database migrations (if needed)
+      - name: Run database migrations
+        if: always()  # Run even if previous steps fail
+        run: |
+          # This assumes you have a way to run migrations against your production database
+          # You might want to run this as a separate ECS task or Lambda function
+          echo "Database migrations would be run here"
+          # Example: Run migrations using a one-time ECS task or SSH to an EC2 instance
+          # For now, we just note that this step is needed
