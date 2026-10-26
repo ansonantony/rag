@@ -169,6 +169,26 @@ flowchart TD
     E --> F["Return {question, answer}"]
 ```
 
+## Evaluation layer
+
+The backend ships a first-class RAG evaluation toolkit under `backend/app/evaluation/`.
+
+- `dataset.py` — evaluation record schema (`EvalRecord`) and JSONL loading/validation.
+- `retrieval_metrics.py` — Recall@K, Precision@K, Hit Rate@K, MRR, and retrieval evaluation.
+- `answer_metrics.py` — normalized exact match and token-overlap answer metrics.
+- `runner.py` — retrieval and end-to-end evaluation orchestration, plus CLI entry.
+- `generate_dataset.py` — AI-assisted candidate generation from source chunks.
+- `datasets/` — candidate and golden JSONL datasets.
+
+Run the retrieval evaluation:
+
+```powershell
+cd backend
+python -m app.evaluation.runner --dataset app/evaluation/datasets/golden_dataset.jsonl --k 5
+```
+
+The initial benchmark uses the reviewed golden dataset at `backend/app/evaluation/datasets/golden_dataset.jsonl`. Retrieval and answer metrics are reported separately, and unanswerable cases are excluded from retrieval aggregates.
+
 ## Repository layout
 
 ```text
