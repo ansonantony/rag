@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from sqlalchemy.orm import Session
 
+from app.evaluation.answer_metrics import answer_token_overlap, normalized_exact_match
 from app.evaluation.dataset import EvalRecord, load_eval_records
 from app.evaluation.retrieval_metrics import DEFAULT_K, RetrievalMetrics, RetrievalResult, evaluate_retrieval
 from app.services.retrieval_service import retrieve
@@ -165,6 +166,140 @@ def create_retriever(user_id: str, db: Session, k: int = 5) -> RetrieverFn:
         return [chunk for chunk in (chunks or []) if isinstance(chunk, dict)]
 
     return retriever
+
+
+@dataclass(frozen=True)
+class AnswerEvalCaseResult:
+    question_id: str
+    question: str
+    answerable: bool
+    generated_answer: str | None
+    normalized_exact_match: bool
+    token_overlap: float
+    retrieved_chunk_ids: list[str]
+    relevant_chunk_ids: list[str]
+    metrics: RetrievalMetrics | None = None
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class AnswerAggregateMetrics:
+    evaluated: int
+    normalized_exact_match_accuracy: float
+    abstained: int
+
+
+@dataclass(frozen=True)
+class EndToEndEvaluationRun:
+    k: int
+    retrieval_results: list[RetrievalEvalCaseResult]
+    answer_results: list[AnswerEvalCaseResult]
+    retrieval_aggregate: RetrievalAggregateMetrics
+    answer_aggregate: AnswerAggregateMetrics
+    errors: list[str]
+
+
+AnswerGeneratorFn = Callable[[str, list[str]], str]
+
+
+def run_end_to_end_evaluation(cases: list[EvalRecord], retriever: RetrieverFn, generate_answer: AnswerGeneratorFn, k: int = DEFAULT_K) -> EndToEndEvaluationRun:
+    """Run retrieval and answer evaluation together for a set of evaluation cases."""
+    retrieval_run = run_retrieval_evaluation(cases, retriever, k=k)
+    answer_results: list[AnswerEvalCaseResult] = []
+    errors: list[str] = list(retrieval_run.errors)
+    answer_aggregate = AnswerAggregateMetrics(evaluated=0, normalized_exact_match_accuracy=0.0, abstained=0)
+    answer_matches: list[bool] = []
+
+    for retrieval_result, case in zip(retrieval_run.results, cases):
+        answerable = case.answerable and case.question_type != "unanswerable"
+        if not answerable:
+            answer_results.append(
+                AnswerEvalCaseResult(
+                    question_id=case.id,
+                    question=case.question,
+                    answerable=False,
+                    generated_answer=None,
+                    normalized_exact_match=False,
+                    token_overlap=0.0,
+                    retrieved_chunk_ids=list(case.relevant_chunk_ids),
+                    relevant_chunk_ids=list(case.relevant_chunk_ids),
+                )
+            )
+            answer_aggregate = AnswerAggregateMetrics(
+                evaluated=answer_aggregate.evaluated,
+                normalized_exact_match_accuracy=answer_aggregate.normalized_exact_match_accuracy,
+                abstained=answer_aggregate.abstained + 1,
+            )
+            continue
+
+        if retrieval_result.error or retrieval_result.metrics is None:
+            error = retrieval_result.error or f"{case.id}: missing retrieval result"
+            errors.append(error)
+            answer_results.append(
+                AnswerEvalCaseResult(
+                    question_id=case.id,
+                    question=case.question,
+                    answerable=True,
+                    generated_answer=None,
+                    normalized_exact_match=False,
+                    token_overlap=0.0,
+                    retrieved_chunk_ids=[],
+                    relevant_chunk_ids=list(case.relevant_chunk_ids),
+                    metrics=None,
+                    error=error,
+                )
+            )
+            continue
+
+        try:
+            generated_answer = generate_answer(case.question, retrieval_result.retrieved_chunk_ids)
+            exact_match = normalized_exact_match(generated_answer, case.reference_answer)
+            token_overlap = answer_token_overlap(generated_answer, case.reference_answer)
+            answer_results.append(
+                AnswerEvalCaseResult(
+                    question_id=case.id,
+                    question=case.question,
+                    answerable=True,
+                    generated_answer=generated_answer,
+                    normalized_exact_match=exact_match,
+                    token_overlap=token_overlap,
+                    retrieved_chunk_ids=retrieval_result.retrieved_chunk_ids,
+                    relevant_chunk_ids=list(case.relevant_chunk_ids),
+                    metrics=retrieval_result.metrics,
+                )
+            )
+            answer_matches.append(exact_match)
+        except Exception as exc:  # noqa: BLE001 - evaluation runner aggregates per-case failures
+            error = f"{case.id}: {exc}"
+            errors.append(error)
+            answer_results.append(
+                AnswerEvalCaseResult(
+                    question_id=case.id,
+                    question=case.question,
+                    answerable=True,
+                    generated_answer=None,
+                    normalized_exact_match=False,
+                    token_overlap=0.0,
+                    retrieved_chunk_ids=[],
+                    relevant_chunk_ids=list(case.relevant_chunk_ids),
+                    metrics=None,
+                    error=error,
+                )
+            )
+
+    answer_aggregate = AnswerAggregateMetrics(
+        evaluated=len(answer_matches),
+        normalized_exact_match_accuracy=(sum(1 for matched in answer_matches if matched) / len(answer_matches)) if answer_matches else 0.0,
+        abstained=answer_aggregate.abstained,
+    )
+    return EndToEndEvaluationRun(
+        k=k,
+        retrieval_results=retrieval_run.results,
+        answer_results=answer_results,
+        retrieval_aggregate=retrieval_run.aggregate,
+        answer_aggregate=answer_aggregate,
+        errors=errors,
+    )
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:

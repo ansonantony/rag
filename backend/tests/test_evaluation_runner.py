@@ -1,5 +1,5 @@
 from app.evaluation.dataset import EvalRecord
-from app.evaluation.runner import run_retrieval_evaluation
+from app.evaluation.runner import run_end_to_end_evaluation, run_retrieval_evaluation
 
 
 def _case(**overrides):
@@ -48,3 +48,23 @@ def test_runner_skips_unanswerable_cases():
     assert run.results[0].metrics is None
     assert run.aggregate.unanswerable == 1
     assert run.aggregate.evaluated == 0
+
+
+def test_end_to_end_evaluation_computes_retrieval_and_answer_metrics():
+    def retriever(question: str, document_id: str):
+        assert document_id == "doc-1"
+        return [{"chunk_id": "chunk-1", "source_text": "PostgreSQL", "similarity_score": 0.9}]
+
+    def generate_answer(question: str, retrieved_chunk_ids: list[str]) -> str:
+        return "PostgreSQL" if "chunk-1" in retrieved_chunk_ids else "I don't know."
+
+    run = run_end_to_end_evaluation([_case()], retriever, generate_answer, k=3)
+
+    assert len(run.retrieval_results) == 1
+    assert len(run.answer_results) == 1
+    assert run.retrieval_aggregate.answerable == 1
+    assert run.answer_aggregate.evaluated == 1
+    assert run.answer_aggregate.normalized_exact_match_accuracy == 1.0
+    assert run.answer_results[0].generated_answer == "PostgreSQL"
+    assert run.answer_results[0].token_overlap == 1.0
+    assert run.errors == []
