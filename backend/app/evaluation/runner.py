@@ -1,12 +1,13 @@
 """Retrieval evaluation runner for the RAG evaluation pipeline."""
 
+import argparse
 import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
 
 from sqlalchemy.orm import Session
 
-from app.evaluation.dataset import EvalRecord
+from app.evaluation.dataset import EvalRecord, load_eval_records
 from app.evaluation.retrieval_metrics import DEFAULT_K, RetrievalMetrics, RetrievalResult, evaluate_retrieval
 from app.services.retrieval_service import retrieve
 
@@ -164,3 +165,31 @@ def create_retriever(user_id: str, db: Session, k: int = 5) -> RetrieverFn:
         return [chunk for chunk in (chunks or []) if isinstance(chunk, dict)]
 
     return retriever
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run the RAG retrieval evaluation.")
+    parser.add_argument("--dataset", default="app/evaluation/datasets/golden_dataset.jsonl", help="Path to the JSONL evaluation dataset.")
+    parser.add_argument("--k", type=int, default=5, help="Retrieval cut-off K used for metrics.")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    from app.evaluation.report import build_retrieval_report, render_retrieval_report_markdown
+
+    parser = _build_arg_parser()
+    args = parser.parse_args(argv)
+    cases = load_eval_records(args.dataset)
+    evaluated = [case for case in cases if case.answerable and case.source_document_ids]
+
+    def retriever(question: str, document_id: str) -> list[dict[str, Any]]:
+        raise RuntimeError("Retriever backend not configured for CLI evaluation; provide a retriever callable in application code.")
+
+    run = run_retrieval_evaluation(evaluated, retriever, k=args.k)
+    report = build_retrieval_report(run)
+    print(render_retrieval_report_markdown(run))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
